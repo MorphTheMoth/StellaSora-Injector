@@ -1,35 +1,36 @@
-#include <Windows.h>
-#include <TlHelp32.h>
+#include <windows.h>
+#include <tlhelp32.h> // Lowercase for MinGW compatibility
 #include <iostream>
+#include <string.h>
 
 DWORD GetProcessByName(const char* lpProcessName)
 {
-    char lpCurrentProcessName[255];
-
     PROCESSENTRY32 ProcList {};
     ProcList.dwSize = sizeof(ProcList);
 
+    // Create snapshot of running processes
     const HANDLE hProcList = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hProcList == INVALID_HANDLE_VALUE)
-        return -1;
+        return (DWORD)-1;
 
-    if (!Process32First(hProcList, &ProcList))
-        return -1;
-
-    wcstombs_s(nullptr, lpCurrentProcessName, ProcList.szExeFile, 255);
-
-    if (lstrcmpA(lpCurrentProcessName, lpProcessName) == 0)
-        return ProcList.th32ProcessID;
-
-    while (Process32Next(hProcList, &ProcList))
-    {
-        wcstombs_s(nullptr, lpCurrentProcessName, ProcList.szExeFile, 255);
-
-        if (lstrcmpA(lpCurrentProcessName, lpProcessName) == 0)
-            return ProcList.th32ProcessID;
+    if (!Process32First(hProcList, &ProcList)) {
+        CloseHandle(hProcList);
+        return (DWORD)-1;
     }
 
-    return -1;
+    // Loop through processes and compare names
+    do {
+        // Since ProcList.szExeFile is already a CHAR array in your build, 
+        // we compare directly using _stricmp (case-insensitive)
+        if (_stricmp(ProcList.szExeFile, lpProcessName) == 0) {
+            DWORD dwPID = ProcList.th32ProcessID;
+            CloseHandle(hProcList);
+            return dwPID;
+        }
+    } while (Process32Next(hProcList, &ProcList));
+
+    CloseHandle(hProcList);
+    return (DWORD)-1;
 }
 
 int main(const int argc, char* argv[])
@@ -52,6 +53,7 @@ int main(const int argc, char* argv[])
 
     printf("Waiting for process: %s...\n", lpProcessName);
 
+    // Block until the process is found
     while (dwProcessID == (DWORD)-1) {
         dwProcessID = GetProcessByName(lpProcessName);
 
@@ -61,67 +63,79 @@ int main(const int argc, char* argv[])
     }
 
     printf("Process %s found with ID: %lu\n", lpProcessName, dwProcessID);
-
     printf("[DLL Injector]\n");
     printf("Process : %s\n", lpProcessName);
     printf("Process ID : %i\n\n", (int)dwProcessID);
 
+    // Resolve absolute path to the DLL
     const DWORD dwFullPathResult = GetFullPathNameA(lpDLLName, MAX_PATH, lpFullDLLPath, nullptr);
     if (dwFullPathResult == 0)
     {
-        printf("An error is occured when trying to get the full path of the DLL.\n");
+        printf("Error: Could not resolve full path of DLL.\n");
         return -1;
     }
 
+    // Open target process with necessary permissions
     const HANDLE hTargetProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwProcessID);
-    if (hTargetProcess == INVALID_HANDLE_VALUE)
+    if (hTargetProcess == NULL)
     {
-        printf("An error is occured when trying to open the target process.\n");
+        printf("Error: Could not open target process (Access Denied?).\n");
         return -1;
     }
 
     printf("[PROCESS INJECTION]\n");
     printf("Process opened successfully.\n");
 
-    const LPVOID lpPathAddress = VirtualAllocEx(hTargetProcess, nullptr, lstrlenA(lpFullDLLPath) + 1, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    // Allocate memory in target process for the DLL path string
+    const LPVOID lpPathAddress = VirtualAllocEx(hTargetProcess, nullptr, strlen(lpFullDLLPath) + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (lpPathAddress == nullptr)
     {
-        printf("An error is occured when trying to allocate memory in the target process.\n");
+        printf("Error: Memory allocation failed in target process.\n");
+        CloseHandle(hTargetProcess);
         return -1;
     }
 
-    printf("Memory allocate at 0x%X\n", (UINT)(uintptr_t)lpPathAddress);
+    printf("Memory allocated at 0x%p\n", lpPathAddress);
 
-    const DWORD dwWriteResult = WriteProcessMemory(hTargetProcess, lpPathAddress, lpFullDLLPath, lstrlenA(lpFullDLLPath) + 1, nullptr);
-    if (dwWriteResult == 0)
+    // Write the DLL path into the allocated memory
+    if (!WriteProcessMemory(hTargetProcess, lpPathAddress, lpFullDLLPath, strlen(lpFullDLLPath) + 1, nullptr))
     {
-        printf("An error is occured when trying to write the DLL path in the target process.\n");
+        printf("Error: Failed to write to process memory.\n");
+        VirtualFreeEx(hTargetProcess, lpPathAddress, 0, MEM_RELEASE);
+        CloseHandle(hTargetProcess);
         return -1;
     }
 
-    printf("DLL path writen successfully.\n");
+    printf("DLL path written successfully.\n");
 
+    // Get address of LoadLibraryA from kernel32.dll
     const HMODULE hModule = GetModuleHandleA("kernel32.dll");
-    if (hModule == INVALID_HANDLE_VALUE || hModule == nullptr)
-        return -1;
-
     const FARPROC lpFunctionAddress = GetProcAddress(hModule, "LoadLibraryA");
+    
     if (lpFunctionAddress == nullptr)
     {
-        printf("An error is occured when trying to get \"LoadLibraryA\" address.\n");
+        printf("Error: Could not find LoadLibraryA address.\n");
         return -1;
     }
 
-    printf("LoadLibraryA address at 0x%X\n", (UINT)(uintptr_t)lpFunctionAddress);
+    printf("LoadLibraryA address at 0x%p\n", (void*)lpFunctionAddress);
 
-    const HANDLE hThreadCreationResult = CreateRemoteThread(hTargetProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)lpFunctionAddress, lpPathAddress, 0, nullptr);
-    if (hThreadCreationResult == INVALID_HANDLE_VALUE)
+    // Create remote thread to execute LoadLibraryA(lpPathAddress)
+    const HANDLE hThread = CreateRemoteThread(hTargetProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)lpFunctionAddress, lpPathAddress, 0, nullptr);
+    if (hThread == NULL)
     {
-        printf("An error is occured when trying to create the thread in the target process.\n");
+        printf("Error: Failed to create remote thread.\n");
         return -1;
     }
 
-    printf("DLL Injected !\n");
+    WaitForSingleObject(hThread, INFINITE);
+    
+    printf("DLL Injected!\n");
+
+    // Cleanup
+    CloseHandle(hThread);
+    CloseHandle(hTargetProcess);
 
     return 0;
 }
+
