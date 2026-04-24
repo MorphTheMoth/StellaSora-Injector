@@ -1,5 +1,11 @@
-💉 Dll Injector
-A simple and versatile tool for injecting a DLL file into a running process. This injector is primarily designed for use with StellaSora but can be applied to any compatible Windows process.
+Simple Dll injector for the game Stella Sora.
 
-⚠️ Disclaimer and Warning
-Use this tool at your own risk.
+Forked because the orignal forgot to include some libraries when compiling.
+
+
+
+## Compile from source
+
+```bash
+x86_64-w64-mingw32-g++ -o DLL_Injector.exe DLL_Injector.cpp -m64 -O2 -std=c++17 -static-libgcc -static-libstdc++
+```
